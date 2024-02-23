@@ -1,134 +1,81 @@
-name: Tests and Linting
+# Terraform Provider testing workflow.
+name: Tests
 
-on: [pull_request]
+# This GitHub action runs your tests for each pull request and push.
+# Optionally, you can turn it on using a schedule for regular testing.
+on:
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+  push:
+    paths-ignore:
+      - 'README.md'
+
+# Testing only needs permissions to read the repository contents.
+permissions:
+  contents: read
 
 jobs:
-  tflint:
-    name: Lint .tf examples
+  # Ensure project builds before running testing matrix
+  build:
+    name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v3
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe # v4.1.0
         with:
           go-version-file: 'go.mod'
+          cache: true
+      - run: go mod download
+      - run: go build -v .
+      - name: Run linters
+        uses: golangci/golangci-lint-action@3a919529898de77ec3da873e3063ca4b10e7f5cc # v3.7.0
+        with:
+          version: latest
 
-      - name: install tflint
-        uses: terraform-linters/setup-tflint@v2
-
-      - run: tflint --init
-
-      - name: tflint
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe # v4.1.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - run: go generate ./...
+      - name: git diff
         run: |
-          exit_code=0
-          for DIR in $(find ./examples -type f -name '*.tf' -exec dirname {} \; | sort -u); do
-            pushd "$DIR"
-            tflint \
-              --enable-rule=terraform_comment_syntax \
-              --enable-rule=terraform_deprecated_index \
-              --enable-rule=terraform_deprecated_interpolation \
-              --disable-rule=terraform_unused_declarations \
-              --disable-rule=terraform_required_version \
-              --disable-rule=terraform_required_providers \
-              --disable-rule=terraform_typed_variables \
-              || exit_code=1
-            popd
-          done
-          exit $exit_code
-  validate-terraform:
-    name: Check fmt and Validate .tf examples
+          git diff --compact-summary --exit-code || \
+            (echo; echo "Unexpected difference in directories after code generation. Run 'go generate ./...' command and commit."; exit 1)
+
+  # Run acceptance tests in a matrix with Terraform CLI versions
+  test:
+    name: Terraform Provider Acceptance Tests
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # list whatever Terraform versions here you would like to support
+        terraform:
+          - '1.0.*'
+          - '1.1.*'
+          - '1.2.*'
+          - '1.3.*'
+          - '1.4.*'
     steps:
-        - uses: actions/checkout@v3
-          with:
-            fetch-depth: 0
-        
-        - uses: actions/setup-go@v3
-          with:
-            go-version-file: 'go.mod'
-
-        - name: build and install provider
-          run: make clean-dev && make install-dev
-
-        - name: override plugin
-          run: |
-            mkdir -p ~/.terraform.d/plugins/github.com/aziontech/azion/0.1.0/"$(go env GOOS)"_"$(go env GOARCH)"/
-            ls -lh ~/.terraform.d/plugins/github.com/aziontech/azion/0.1.0/linux_amd64
-
-        - uses: hashicorp/setup-terraform@v2
-          with:
-           terraform_version: 1.4.6
-           terraform_wrapper: false
-
-        - name: terraform check
-          run: |
-            for DIR in $(find ./examples -type f -name '*.tf' -exec dirname {} \; | sort -u); do
-              pushd "$DIR"
-              cat <<EOF > provider.tf
-            terraform {
-              required_providers {
-                azion = {
-                  source  = "github.com/aziontech/azion"
-                  version = "0.1.0"
-                }
-              }
-            }
-            provider "azion" {
-              api_token = "t0k3nh3r3t0k3nh3r3t0k3nh3r3t0k3nh3r3t0k3nh3r3"
-            }
-            EOF
-              if [ -f terraform.template.tfvars ]; then
-                cp terraform.template.tfvars terraform.tfvars
-              fi
-              echo; echo -e "\e[1;35m===> Initializing Example: $DIR <===\e[0m"; echo
-              terraform init
-              echo; echo -e "\e[1;35m===> Format Checking Example: $DIR <===\e[0m"; echo
-              terraform fmt -check
-              echo; echo -e "\e[1;35m===> Validating Example: $DIR <===\e[0m"; echo
-              # Catch errors
-              terraform validate
-              popd
-            done
-  func-tests:
-    name: Terraform Functional Tests
-    timeout-minutes: 60
-    env:
-      AZION_API_TOKEN: ${{ secrets.E2E_PROD_TERRAFORM_TOKEN }}
-      AZION_API_ENTRYPOINT: "https://api.azionapi.net"
-    runs-on: ubuntu-latest
-    steps:
-        - uses: actions/checkout@v3
-          with:
-            fetch-depth: 0
-        
-        - uses: actions/setup-go@v3
-          with:
-            go-version-file: 'go.mod'
-
-        - name: build and install provider
-          run: make clean-dev && make install-dev
-
-        - name: override plugin
-          run: |
-            mkdir -p ~/.terraform.d/plugins/github.com/aziontech/azion/0.1.0/"$(go env GOOS)"_"$(go env GOARCH)"/
-            ls -lh ~/.terraform.d/plugins/github.com/aziontech/azion/0.1.0/linux_amd64
-
-        - uses: hashicorp/setup-terraform@v2
-          with:
-           terraform_version: 1.4.6
-           terraform_wrapper: false
-
-        - name: replace test-func string on .tf
-          run: |
-            sed -i 's/test-func/test-func-action/g' func-tests/main.tf
-
-        - name: run func tests
-          run: | 
-            make func-init && make func-plan && make func-apply
-
-        - name: destroy after run func tests
-          if: ${{ always() }}
-          run: | 
-            make func-destroy
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe # v4.1.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+      - run: go mod download
+      - env:
+          TF_ACC: "1"
+        run: go test -v -cover ./internal/provider/
+        timeout-minutes: 10
